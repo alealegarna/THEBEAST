@@ -7,12 +7,12 @@ import requests
 from datetime import datetime
 
 # 1. KONFIGURASI HALAMAN & STYLE BLOOMBERG TERMINAL
-st.set_page_config(page_title="IDX QUANT TERMINAL // INSTITUTIONAL V2", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="IDX QUANT TERMINAL // V2.1 ON-SCREEN", layout="wide", initial_sidebar_state="collapsed")
 
 bloomberg_style = """
 <style>
     .stApp { background-color: #000000; color: #E0E0E0; font-family: 'Courier New', Courier, monospace; }
-    h1, h2, h3 { color: #FF9900 !important; font-family: 'Courier New', Courier, monospace; font-weight: bold; }
+    h1, h2, h3, h4 { color: #FF9900 !important; font-family: 'Courier New', Courier, monospace; font-weight: bold; }
     div[data-testid="stTable"] { border: 1px solid #FF9900; }
     table { width: 100%; border-collapse: collapse; }
     th { background-color: #111111; color: #FF9900; border-bottom: 2px solid #FF9900; padding: 8px; text-align: left; font-size: 13px; }
@@ -20,6 +20,8 @@ bloomberg_style = """
     .metric-card { background-color: #0a0a0a; border: 1px solid #FF9900; padding: 12px; text-align: center; }
     .metric-title { color: #FF9900; font-size: 11px; letter-spacing: 1px; }
     .metric-value { font-size: 22px; font-weight: bold; margin-top: 5px; }
+    .ticket-box { background-color: #0d0d0d; border-left: 5px solid #00FF00; border-top: 1px solid #333; border-right: 1px solid #333; border-bottom: 1px solid #333; padding: 15px; margin-bottom: 10px; }
+    .briefing-box { background-color: #1a0f00; border: 1px solid #FF9900; padding: 12px; font-size: 14px; color: #FFCC00; margin-bottom: 20px; }
     .green-text { color: #00FF00; font-weight: bold; }
     .red-text { color: #FF0000; font-weight: bold; }
     .amber-text { color: #FF9900; font-weight: bold; }
@@ -87,7 +89,7 @@ def hitung_obv(data):
     obv = (np.sign(data['Close'].diff()) * data['Volume']).fillna(0).cumsum()
     return obv
 
-# 4. CORE ENGINE WITH KELLY CRITERION & ATR RISK MANAGEMENT
+# 4. CORE ENGINE WITH LOT CALCULATOR
 def analisa_pasar_masal(tickers, modal_total, progress_bar, status_text):
     hasil = []
     total_saham = len(tickers)
@@ -102,7 +104,6 @@ def analisa_pasar_masal(tickers, modal_total, progress_bar, status_text):
             saham = yf.Ticker(ticker)
             df = saham.history(period="6mo")
             
-            # Anti-Phantom Bar
             df = df.dropna(subset=['Close', 'Volume'])
             df = df[df['Volume'] > 0] 
             
@@ -117,7 +118,6 @@ def analisa_pasar_masal(tickers, modal_total, progress_bar, status_text):
             vol_last = df['Volume'].iloc[-1]
             vol_avg = df['Volume'].tail(20).mean()
 
-            # Kalkulasi Indikator Lanjutan
             df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
             df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
             df['RSI'] = hitung_rsi(df)
@@ -129,56 +129,46 @@ def analisa_pasar_masal(tickers, modal_total, progress_bar, status_text):
             rsi_last = df['RSI'].iloc[-1]
             mfi_last = df['MFI'].iloc[-1] if not pd.isna(df['MFI'].iloc[-1]) else 50
             
-            # --- A. VALUE INVESTING (25 Poin) ---
             pe = info.get('trailingPE', 0) or 0
             pb = info.get('priceToBook', 0) or 0
             roe = (info.get('returnOnEquity', 0) or 0) * 100
             val_score = (10 if 0 < pe < 15 else 0) + (8 if 0 < pb < 2.0 else 0) + (7 if roe > 15 else 0)
 
-            # --- B. ADVANCED BANDARMOLOGI: OBV & VOLUME ANOMALY (25 Poin) ---
             bandar_score = 0
             if vol_last > (vol_avg * 1.5) and close > df['Open'].iloc[-1]:
                 bandar_score += 15
-            # OBV Bullish Divergence (OBV Naik saat EMA turun/datar = Akumulasi Diam-diam)
             if df['OBV'].iloc[-1] > df['OBV'].tail(10).mean() and close >= df['Close'].tail(10).mean():
                 bandar_score += 10
 
-            # --- C. SWING & MONEY FLOW (35 Poin) ---
             swing_score = 0
             if close > df['EMA20'].iloc[-1] > df['EMA50'].iloc[-1]: swing_score += 15
             if 40 <= rsi_last <= 60: swing_score += 10
             if mfi_last > 50: swing_score += 10
 
-            # --- D. CORPORATE ACTION PROXY (15 Poin) ---
             div_yield = (info.get('dividendYield', 0) or 0) * 100
             corp_score = 15 if div_yield > 5.0 else (10 if div_yield > 2.0 else 0)
 
-            # --- TOTAL PROBABILITAS ---
             total_prob = val_score + bandar_score + swing_score + corp_score
             prob_desimal = total_prob / 100.0
 
-            # --- DYNAMIC ATR RISK / REWARD ---
-            # Target (Reward) = 2.5x ATR dari harga sekarang (Dynamic Resistance)
             target_price = close + (atr_last * 2.5)
-            # Stop Loss (Risk) = 1.5x ATR di bawah harga sekarang (Dynamic Volatility Stop)
             stop_price = close - (atr_last * 1.5)
             
             peluang_naik_pct = ((target_price - close) / close) * 100
             risiko_turun_pct = ((close - stop_price) / close) * 100
             rr_ratio = peluang_naik_pct / risiko_turun_pct if risiko_turun_pct > 0 else 0
 
-            # --- KELLY CRITERION POSITION SIZING (MANAJEMEN MODAL) ---
-            # Rumus Kelly: W - ((1 - W) / R), di mana W = Probabilitas Menang, R = R:R Ratio
             if rr_ratio > 0:
                 kelly_pct = prob_desimal - ((1.0 - prob_desimal) / rr_ratio)
             else:
                 kelly_pct = 0
             
-            # Kita gunakan "Half-Kelly" dan batasi maksimal 20% modal per saham demi keamanan (Institutional Rule)
             alokasi_pct = max(min(kelly_pct * 0.5 * 100, 20.0), 0.0)
             alokasi_rp = (alokasi_pct / 100.0) * modal_total
+            
+            # Perhitungan Lot Otomatis (1 Lot = 100 Lembar)
+            lot_beli = int(alokasi_rp / (close * 100)) if close > 0 else 0
 
-            # --- SINYAL ---
             if total_prob >= 70 and rr_ratio >= 1.5 and alokasi_pct > 5:
                 sinyal = "STRONG BUY 🟢"
             elif total_prob >= 55:
@@ -188,10 +178,12 @@ def analisa_pasar_masal(tickers, modal_total, progress_bar, status_text):
 
             hasil.append({
                 "Ticker": ticker.replace(".JK", ""),
-                "Harga": f"Rp {int(close):,}",
+                "Harga": int(close),
+                "Harga_Str": f"Rp {int(close):,}",
                 "Probabilitas": total_prob,
                 "Sinyal": sinyal,
-                "Beli Max (Rp)": f"Rp {int(alokasi_rp):,}" if alokasi_rp > 0 else "Rp 0",
+                "Lot_Beli": lot_beli,
+                "Alokasi_Rp_Str": f"Rp {int(alokasi_rp):,}",
                 "Bobot (%)": f"{alokasi_pct:.1f}%",
                 "Target (+)": f"Rp {int(target_price):,} (+{peluang_naik_pct:.1f}%)",
                 "Stop Loss (-)": f"Rp {int(stop_price):,} (-{risiko_turun_pct:.1f}%)",
@@ -207,8 +199,8 @@ def analisa_pasar_masal(tickers, modal_total, progress_bar, status_text):
     return pd.DataFrame(hasil), tgl_data_terakhir
 
 # 5. ANTARMUKA TERMINAL
-st.markdown("<h1>> IDX QUANTITATIVE TERMINAL // INSTITUTIONAL GRADE V2.0</h1>", unsafe_allow_html=True)
-st.markdown("<div class='status-box'>⚡ ENGINE V2 ACTIVE: Powered by On-Balance Volume (OBV) Accumulation, Dynamic ATR Stop-Loss, and Kelly Criterion Position Sizing.</div>", unsafe_allow_html=True)
+st.markdown("<h1>> IDX QUANTITATIVE TERMINAL // V2.1 ON-SCREEN EXECUTIVE</h1>", unsafe_allow_html=True)
+st.markdown("<div class='status-box'>⚡ ALL-IN-ONE SCREEN: Seluruh analisa teknikal, bandarmologi OBV, dan kalkulator Lot ditampilkan langsung di layar ini.</div>", unsafe_allow_html=True)
 st.markdown("---")
 
 col1, col2, col3 = st.columns([2, 1, 1])
@@ -241,45 +233,84 @@ if run_btn:
     df_result, tgl_terakhir = analisa_pasar_masal(tickers_to_run, modal_input, progress_bar, status_text)
     
     progress_bar.empty()
-    status_text.markdown(f"### ✅ ANALISA KUANTITATIF SELESAI! (Data EOD: **{tgl_terakhir}**)")
+    status_text.empty()
     
     if not df_result.empty:
         df_result = df_result.sort_values(by="Probabilitas", ascending=False)
-        top_pick = df_result.iloc[0]
         
-        st.markdown("### > TOP RECOMMENDED INSTITUTIONAL PICK")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(f'<div class="metric-card"><div class="metric-title">TOP TICKER</div><div class="metric-value amber-text">{top_pick["Ticker"]}</div></div>', unsafe_allow_html=True)
-        with c2:
-            st.markdown(f'<div class="metric-card"><div class="metric-title">PROBABILITAS NAIK</div><div class="metric-value green-text">{top_pick["Probabilitas"]}%</div></div>', unsafe_allow_html=True)
-        with c3:
-            st.markdown(f'<div class="metric-card"><div class="metric-title">REKOMENDASI BELI</div><div class="metric-value green-text">{top_pick["Beli Max (Rp)"]}</div></div>', unsafe_allow_html=True)
-        with c4:
-            st.markdown(f'<div class="metric-card"><div class="metric-title">BATAS STOP LOSS</div><div class="metric-value red-text">{top_pick["Stop Loss (-)"]}</div></div>', unsafe_allow_html=True)
+        # Hitung statistik singkat untuk Morning Briefing
+        strong_buy_count = len(df_result[df_result["Sinyal"].str.contains("STRONG BUY")])
+        buy_hold_count = len(df_result[df_result["Sinyal"].str.contains("BUY / HOLD")])
         
-        st.markdown("---")
+        # 1. PANEL MORNING BRIEFING OTOMATIS
+        st.markdown(f"""
+        <div class="briefing-box">
+            📡 <b>EXECUTIVE MARKET BRIEFING (Data EOD: {tgl_terakhir}):</b><br>
+            Sistem selesai memindai <b>{len(df_result)} saham aktif</b>. Terdeteksi ada <span style="color:#00FF00; font-weight:bold;">{strong_buy_count} saham STRONG BUY</span> dan <b>{buy_hold_count} saham BUY/HOLD</b> yang memiliki konfirmasi arus uang masuk (MFI > 50) serta akumulasi volume (OBV).
+        </div>
+        """, unsafe_allow_html=True)
         
-        # Fitur Download Trading Plan CSV
-        csv_data = df_result.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 DOWNLOAD TRADING PLAN (EXCEL / CSV)",
-            data=csv_data,
-            file_name=f"Trading_Plan_BEI_{tgl_terakhir}.csv",
-            mime="text/csv",
-        )
+        # 2. STRUKTUR MULTI-TAB ALA BLOOMBERG
+        tab1, tab2, tab3 = st.tabs(["🎯 TOP PICKS & TRADING TICKET", "📡 LIVE QUANT RADAR (ALL STOCKS)", "⚙️ ALGORITHM SPECS"])
         
-        st.markdown(f"### > INSTITUTIONAL TRADING PLAN TABLE ({len(df_result)} Saham)")
-        
-        def color_prob(val):
-            color = '#00FF00' if val >= 70 else ('#FF9900' if val >= 55 else '#FF0000')
-            return f'color: {color}; font-weight: bold;'
+        with tab1:
+            st.markdown("### > REKOMENDASI UTAMA & KERTAS KERJA EKSEKUSI")
+            st.caption("ℹ️ Kertas kerja di bawah ini langsung menghitung jumlah Lot yang harus dibeli berdasarkan manajemen risiko Kelly Criterion agar portofolio Anda tetap aman.")
             
-        styled_df = df_result.style.map(color_prob, subset=['Probabilitas'])
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            # Tampilkan Top 3 Saham Terbaik dalam bentuk Trading Ticket
+            top_3 = df_result.head(3)
+            for idx, row in top_3.iterrows():
+                border_color = "#00FF00" if "STRONG BUY" in row["Sinyal"] else "#FF9900"
+                st.markdown(f"""
+                <div style="background-color: #0d0d0d; border-left: 6px solid {border_color}; border: 1px solid #333; padding: 15px; margin-bottom: 15px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 20px; font-weight: bold; color: #FF9900;">{row['Ticker']}</span>
+                        <span style="font-size: 16px; font-weight: bold; color: {'#00FF00' if row['Probabilitas']>=70 else '#FF9900'};">{row['Sinyal']} (Probabilitas: {row['Probabilitas']}%)</span>
+                    </div>
+                    <hr style="border-color: #222; margin: 10px 0;">
+                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; font-size: 13px;">
+                        <div><b>Harga Entry:</b><br><span style="color:#FFF; font-size:15px;">{row['Harga_Str']}</span></div>
+                        <div><b>Rekomendasi Beli:</b><br><span style="color:#00FF00; font-size:16px; font-weight:bold;">{row['Lot_Beli']} LOT</span> <span style="color:#888;">({row['Alokasi_Rp_Str']})</span></div>
+                        <div><b>Target Profit (+):</b><br><span style="color:#00FF00;">{row['Target (+)']}</span></div>
+                        <div><b>Batas Stop Loss (-):</b><br><span style="color:#FF0000;">{row['Stop Loss (-)']}</span></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        with tab2:
+            st.markdown(f"### > TABEL PEMANTAUAN KESELURUHAN ({len(df_result)} Saham)")
+            
+            # Tombol Download CSV tetap disediakan jika sewaktu-waktu butuh rekap di Excel
+            csv_data = df_result.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 DOWNLOAD TABEL KE EXCEL (.CSV)",
+                data=csv_data,
+                file_name=f"Quant_Radar_{tgl_terakhir}.csv",
+                mime="text/csv",
+            )
+            
+            # Bersihkan kolom internal sebelum ditampilkan di tabel
+            df_display = df_result.drop(columns=["Harga", "Lot_Beli"]).rename(columns={"Harga_Str": "Harga", "Alokasi_Rp_Str": "Beli Max (Rp)"})
+            
+            def color_prob(val):
+                color = '#00FF00' if val >= 70 else ('#FF9900' if val >= 55 else '#FF0000')
+                return f'color: {color}; font-weight: bold;'
+                
+            styled_df = df_display.style.map(color_prob, subset=['Probabilitas'])
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+        with tab3:
+            st.markdown("### > SPESIFIKASI RUMUS ALGORITMA (THE 4 PILLARS + RISK ENGINE)")
+            st.markdown("""
+            1. **Value Investing (Max 25 Poin):** P/E Ratio < 15x (+10 pt), P/B Ratio < 2.0x (+8 pt), ROE > 15% (+7 pt).
+            2. **Bandarmologi & OBV (Max 25 Poin):** Lonjakan Volume > 1.5x rata-rata disertai candle hijau (+15 pt). Akumulasi diam-diam terdeteksi melalui OBV Bullish Divergence (+10 pt).
+            3. **Swing Trading & Flow (Max 35 Poin):** Konfirmasi Uptrend EMA 20 > EMA 50 (+15 pt), RSI di zona nyaman 40-60 (+10 pt), Money Flow Index (MFI) > 50 menandakan arus uang masuk kuat (+10 pt).
+            4. **Corporate Action Proxy (Max 15 Poin):** Dividend Yield > 5% sebagai *Margin of Safety* (+15 pt), Yield > 2% (+10 pt).
+            5. **Dynamic Risk & Position Sizing:** Target Profit dihitung 2.5x ATR (Average True Range), Stop Loss 1.5x ATR. Jumlah Lot beli dihitung otomatis menggunakan **Half-Kelly Criterion** dengan batas maksimal risiko 20% modal per emiten.
+            """)
         
     else:
         st.error("❌ Tidak ada saham yang lolos filter.")
 
 st.markdown("---")
-st.markdown("<div style='font-size: 11px; color: #666;'>SYSTEM DISCLAIMER: Alokasi modal dihitung menggunakan rumus Half-Kelly Criterion yang disesuaikan dengan ATR volatilitas. Sistem membatasi risiko maksimal 20% per emiten. Tetap gunakan pertimbangan pribadi.</div>", unsafe_allow_html=True)
+st.markdown("<div style='font-size: 11px; color: #666;'>SYSTEM DISCLAIMER: Seluruh perhitungan Lot dan batas Stop Loss disajikan langsung di layar sebagai alat bantu pengambil keputusan (Decision Support System). Tetap terapkan manajemen risiko pribadi Anda.</div>", unsafe_allow_html=True)
